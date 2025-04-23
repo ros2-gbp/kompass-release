@@ -1,1 +1,1 @@
-{"base": "1a9ba11", "parent": "debian/rolling/kompass_interfaces", "previous": "3e3cbc1", "trim": "", "trimbase": ""}
+{"base": "4c911153a81d", "parent": "debian/kilted/kompass_interfaces", "previous": "c688d2bc17c7", "trim": "", "trimbase": ""}
