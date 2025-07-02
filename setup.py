@@ -8,18 +8,19 @@ package_name = "kompass"
 console_scripts = [
     "executable = kompass.executable:main",
     "turtlebot3_test = recipes.turtlebot3:kompass_bringup",
+    "cli = kompass.cli:main",
 ]
 
 setup(
     name=package_name,
-    version="0.2.1",
+    version="0.3.0",
     packages=find_packages(exclude=["test"]),
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
         (
             os.path.join("share", package_name, "params"),
-            glob(os.path.join("params", "*.yaml*")),
+            glob(os.path.join("params", "*.*")),
         ),
     ],
     install_requires=["setuptools"],
