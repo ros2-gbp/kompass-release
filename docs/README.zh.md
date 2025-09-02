@@ -16,7 +16,7 @@ Kompass 内置了**高度优化、基于 GPU 的最先进导航算法的 C++ 实
 - 🛠️[**安装 Kompass**](#安装) 到你的机器人上
 - [**为什么选择 Kompass？**](#为什么选择-kompass)
 - 查看 Kompass 的[**核心组件概览**](#核心组件)
-- 快速上手请查阅[**快速入门教程**](https://automatika-robotics.github.io/kompass/quick_start.html) 🚀
+- 快速上手请查阅[**快速入门教程**](https://automatika-robotics.github.io/kompass/tutorials/quick_start.html) 🚀
 - 深入学习请参阅一个[**完整教程**](https://automatika-robotics.github.io/kompass/tutorials/point_navigation.html) 🤖
 - 想了解设计理念？点击[**设计概念**](https://automatika-robotics.github.io/kompass/advanced/design.html) 📚
 
@@ -91,6 +91,13 @@ sudo apt-get install libompl-dev libfcl-dev libpcl-dev
 
 ```bash
 pip install kompass-core
+```
+
+或者，您也可以从 [发布页面](https://github.com/automatika-robotics/kompass/releases) 下载适用于您喜欢的发行版的 deb 安装包（包括 kompass_interfaces 和 kompass），然后按照以下方式安装：
+
+```bash
+sudo dpkg -i ros-$ROS_DISTRO-kompass-interfaces_$version$DISTRO_$ARCHITECTURE.deb
+sudo dpkg -i ros-$ROS_DISTRO-kompass_$version$DISTRO_$ARCHITECTURE.deb
 ```
 
 ## 安装 Kompass（二进制包，支持 humble 及以上如 jazzy 等版本）

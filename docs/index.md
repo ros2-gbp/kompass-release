@@ -16,6 +16,7 @@ tutorials/quick_start
 cli
 ```
 
+
 ```{toctree}
 :maxdepth: 1
 :caption: Tutorials
@@ -32,6 +33,7 @@ tutorials/configuration
 :maxdepth: 1
 :caption: Navigation Components
 
+navigation/index
 navigation/robot
 navigation/path_planning
 navigation/control
