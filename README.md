@@ -5,7 +5,7 @@
 </picture>
 <br/>
 
-🇨🇳  [简体中文](docs/README.zh.md) | 🇯🇵  [日本語](docs/README.ja.md)
+🇨🇳 [简体中文](docs/README.zh.md) | 🇯🇵 [日本語](docs/README.ja.md)
 
 Welcome to Kompass! The fastest and most intuitive navigation stack known to man! Kompass is a framework for building **robust**, **event-driven** navigation stacks for autonomous mobile robots. Kompass is built to be customizable, extendable and hardware-agnostic. It provides an **intuitive Python API** designed to be easy to integrate, extend, and adapt to a wide range of use cases.
 
@@ -14,7 +14,7 @@ Kompass includes **highly optimized, GPU powered, versions of the most cutting e
 - [**Install**](#installation) Kompass on your robot 🛠️
 - [**Why Kompass?**](#why-kompass)
 - See an overview of Kompass [**Components**](#components)
-- To get started with Kompass, check the [**quick start**](https://automatika-robotics.github.io/kompass/quick_start.html) tutorial 🚀
+- To get started with Kompass, check the [**quick start**](https://automatika-robotics.github.io/kompass/tutorials/quick_start.html) tutorial 🚀
 - Do a deep dive with one of the [**tutorials**](https://automatika-robotics.github.io/kompass/tutorials/point_navigation.html) 🤖
 - Learn more about the [**design concepts**](https://automatika-robotics.github.io/kompass/advanced/design.html) of Kompass 📚
 
@@ -99,6 +99,12 @@ Install pre-built Kompass binary as follows:
 sudo apt install ros-$ROS_DISTRO-kompass
 ```
 
+Alternatively, grab deb packages (for kompass_interfaces and kompass) for your favourite distro from the [release page](https://github.com/automatika-robotics/kompass/releases) and install them as follows:
+
+```bash
+sudo dpkg -i ros-$ROS_DISTRO-kompass-interfaces_$version$DISTRO_$ARCHITECTURE.deb
+sudo dpkg -i ros-$ROS_DISTRO-kompass_$version$DISTRO_$ARCHITECTURE.deb
+```
 
 ## Build Kompass from source
 
