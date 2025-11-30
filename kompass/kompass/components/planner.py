@@ -60,7 +60,7 @@ class Planner(Component):
     - *reached_end*: Flag indicating that the current planning target is reached<br /> Default ``` Topic(name="/reached_end", msg_type="Bool")```
 
     ## Available Run Types:
-    Set from PlannerConfig class or directly from Planner 'run_type' property.
+    Set directly from Planner 'run_type' property.
 
     - *TIMED*: Compute a new plan periodically from current location (last message received on location input Topic) to the goal location (last message received on goal_point input Topic)
     - *EVENT*: Compute a new plan from current location on every new message received on goal_point input Topic
@@ -318,7 +318,7 @@ class Planner(Component):
             return False
         dist: float = self.robot_state.distance(goal_point)
         reached_end = dist <= tolerance.lateral_distance_error
-        self.get_publisher(TopicsKeys.REACHED_END).publish(reached_end)
+        self.get_publisher(TopicsKeys.REACHED_END).publish(bool(reached_end))
         return reached_end
 
     def main_action_callback(self, goal_handle: PlanPathAction.Goal):
