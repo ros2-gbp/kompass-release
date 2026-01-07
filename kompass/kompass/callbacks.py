@@ -7,12 +7,14 @@ from ros_sugar.io import GenericCallback, OccupancyGridCallback
 from ros_sugar.io import OdomCallback as BaseOdomCallback
 from ros_sugar.io import PointCallback as BasePointCallback
 from ros_sugar.io import PoseCallback as BasePoseCallback
+from ros_sugar.io import get_logger
 from kompass_core.datatypes import (
     LaserScanData,
     PointCloudData,
 )
 from kompass_core.utils import geometry as GeometryUtils
 from kompass_core.models import RobotState
+from kompass_cpp.types import PointFieldType
 
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
@@ -520,6 +522,16 @@ class PointCloudCallback(GenericCallback):
         :rtype: None
         """
         super().__init__(input_topic, node_name)
+        self.__x_field_datatype: Optional[PointFieldType] = None
+
+    @property
+    def field_type(self) -> Optional[PointFieldType]:
+        """Getter of the point cloud fields datatype (from the X field)
+
+        :return: Data type
+        :rtype: Optional[PointFieldType]
+        """
+        return self.__x_field_datatype
 
     def _get_output(
         self,
@@ -547,15 +559,18 @@ class PointCloudCallback(GenericCallback):
         for field in self.msg.fields:
             if field.name == "x":
                 pc.x_offset = field.offset
+                # Get the x field point type
+                self.__x_field_datatype = PointFieldType.from_int(field.datatype)
             elif field.name == "y":
                 pc.y_offset = field.offset
             elif field.name == "z":
                 pc.z_offset = field.offset
 
-        assert (
-            pc.x_offset is not None
-            and pc.y_offset is not None
-            and pc.z_offset is not None
-        ), "Offsets for x, y, z are not found"
+        if (pc.x_offset is None
+        or pc.y_offset is None
+        or pc.z_offset is None
+            ):
+            get_logger(self.node_name).warning("Offsets for x, y, z are not found, point cloud data is null")
+            return None
 
         return pc
