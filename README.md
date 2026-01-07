@@ -1,3 +1,28 @@
+## kompass (humble) - 0.4.0-1
+
+The packages in the `kompass` repository were released into the `humble` distro by running `/usr/bin/bloom-release --rosdistro humble kompass` on `Wed, 07 Jan 2026 16:01:19 -0000`
+
+These packages were released:
+- `kompass`
+- `kompass_interfaces`
+
+Version of package(s) in repository `kompass`:
+
+- upstream repository: https://github.com/automatika-robotics/kompass.git
+- release repository: https://github.com/ros2-gbp/kompass-release.git
+- rosdistro version: `0.3.3-1`
+- old version: `0.3.3-1`
+- new version: `0.4.0-1`
+
+Versions of tools used:
+
+- bloom version: `0.13.0`
+- catkin_pkg version: `1.1.0`
+- rosdep version: `0.26.0`
+- rosdistro version: `1.0.1`
+- vcstools version: `0.1.42`
+
+
 ## kompass (rolling) - 0.3.3-1
 
 The packages in the `kompass` repository were released into the `rolling` distro by running `/home/ahr/.venv/bin/bloom-release --rosdistro rolling kompass` on `Sun, 30 Nov 2025 14:20:01 -0000`
