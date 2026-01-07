@@ -16,6 +16,7 @@ Kompass includes **highly optimized, GPU powered, versions of the most cutting e
 - See an overview of Kompass [**Components**](#components)
 - To get started with Kompass, check the [**quick start**](https://automatika-robotics.github.io/kompass/tutorials/quick_start.html) tutorial 🚀
 - Do a deep dive with one of the [**tutorials**](https://automatika-robotics.github.io/kompass/tutorials/point_navigation.html) 🤖
+- See [**Benchmarking Results**](#benchmarking-results) 📊
 - Learn more about the [**design concepts**](https://automatika-robotics.github.io/kompass/advanced/design.html) of Kompass 📚
 - Explore the [**Dynamic Web UI**](#dynamic-web-ui-for-kompass-recipes) for real-time system visualization and control 🖥️
 - (**!NEW**) [**Port KOMPASS automation recipes across different robots and hardware**](#using-robot-plugins-for-generic-and-portable-automation-recipes-apps) using **Robot Plugins** 🔌
@@ -75,20 +76,14 @@ kompass-core is a python package that provides highly optimized implementations 
 On any Ubuntu (including Jetpack) based machine, you can simply run the following:
 
 ```bash
-curl https://raw.githubusercontent.com/automatika-robotics/kompass-core/refs/heads/main/build_dependencies/install_gpu.sh | bash
+curl -sSL https://raw.githubusercontent.com/automatika-robotics/kompass-core/refs/heads/main/build_dependencies/install_gpu.sh | bash
 ```
 
 This script will install all relevant dependencies, including [AdaptiveCPP](https://github.com/AdaptiveCpp/AdaptiveCpp) and install the latest version of kompass-core from source. It is good practice to read the [script](https://github.com/automatika-robotics/kompass-core/blob/main/build_dependencies/install_gpu.sh) first.
 
 ### Installing with pip
 
-On Ubuntu versions >= 22.04, install dependencies by running the following:
-
-```bash
-sudo apt-get install libompl-dev libfcl-dev libpcl-dev
-```
-
-Then install kompass-core as follows:
+Install kompass-core as follows:
 
 ```bash
 pip install kompass-core
@@ -123,6 +118,25 @@ rosdep install -y --from-paths . --ignore-src
 cd ..
 colcon build
 ```
+
+# Benchmarking Results
+
+The plots below visualize the performance differences across platforms for various components of the navigation stack (provided by [`kompass-core`](https://github.com/automatika-robotics/kompass-core)). The **Logarithmic Scale** plot is essential for comparing CPU vs. GPU performance where differences can be orders of magnitude large, while the **Linear Scale** plot is useful for comparing performance within similar hardware classes. See the [benchmarking details](https://github.com/automatika-robotics/kompass-core/blob/main/src/kompass_cpp/benchmarks/README.md) in the core repository for how these plots were generated and what tasks were measured.
+
+### Logarithmic Scale (CPU vs GPU Comparison)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/automatika-robotics/kompass-core/main/docs/benchmark_log_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/automatika-robotics/kompass-core/main/docs/benchmark_log_light.png">
+  <img alt="Logarithmic Benchmark Results" src="https://raw.githubusercontent.com/automatika-robotics/kompass-core/main/docs/benchmark_log_light.png">
+</picture>
+
+### Linear Scale (Absolute Time)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/automatika-robotics/kompass-core/main/docs/benchmark_abs_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/automatika-robotics/kompass-core/main/docs/benchmark_abs_light.png">
+  <img alt="Linear Benchmark Results" src="https://raw.githubusercontent.com/automatika-robotics/kompass-core/main/docs/benchmark_abs_light.png">
+</picture>
+
 
 # Dynamic Web UI for Kompass Recipes
 

@@ -19,6 +19,7 @@ Kompass は、**最新のナビゲーションアルゴリズムをC++でGPU最�
 - Kompassの[**構成要素**](#構成要素)の概要を見る
 - [**クイックスタート**](https://automatika-robotics.github.io/kompass/tutorials/quick_start.html)で始める 🚀
 - [**チュートリアル**](https://automatika-robotics.github.io/kompass/tutorials/point_navigation.html)で深掘りする 🤖
+- [**ベンチマーク結果**](#ベンチマーク結果) を参照 📊
 - Kompassの[**設計コンセプト**](https://automatika-robotics.github.io/kompass/advanced/design.html)を学ぶ 📚
 - リアルタイムのシステム可視化と制御のための [**ダイナミック Web UI**](#kompassレシピ向けのダイナミックweb-ui) を探索 🖥️
 - (**!NEW**) **ロボットプラグイン (Robot Plugins)** 🔌 を使用して、[**KOMPASS自動化レシピを異なるロボットやハードウェア間で移植**](#ロボットプラグインを使用した汎用的でポータブルな自動化レシピアプリの利用)
@@ -83,20 +84,14 @@ ROS2のインストールは[公式サイト](https://docs.ros.org/)をご参照
 Ubuntu系システム（Jetpack含む）では、以下を実行してください：
 
 ```bash
-curl https://raw.githubusercontent.com/automatika-robotics/kompass-core/refs/heads/main/build_dependencies/install_gpu.sh | bash
+curl -sSL https://raw.githubusercontent.com/automatika-robotics/kompass-core/refs/heads/main/build_dependencies/install_gpu.sh | bash
 ```
 
 このスクリプトは、[AdaptiveCPP](https://github.com/AdaptiveCpp/AdaptiveCpp) を含むすべての関連依存関係をインストールし、`kompass-core` の最新版をソースからインストールします。事前に[スクリプト](https://github.com/automatika-robotics/kompass-core/blob/main/build_dependencies/install_gpu.sh)の内容を確認することを推奨します。
 
-### pipによるインストール
+### pip を使ったインストール
 
-Ubuntu 22.04以降のバージョンでは、以下のコマンドで依存関係をインストールしてください：
-
-```bash
-sudo apt-get install libompl-dev libfcl-dev libpcl-dev
-```
-
-その後、以下のようにして kompass-core をインストールします：
+以下のように kompass-core をインストールします：
 
 ```bash
 pip install kompass-core
@@ -132,6 +127,26 @@ cd ..
 colcon build
 
 ```
+
+
+# ベンチマーク結果
+
+以下のグラフは、ナビゲーションスタックの様々なコンポーネント（[`kompass-core`](https://github.com/automatika-robotics/kompass-core)により提供）における、プラットフォーム間の性能差を可視化したものです。**対数スケール（Logarithmic Scale）**のグラフは、桁違いの差が生じる可能性があるCPUとGPUの性能を比較するために不可欠です。一方、**線形スケール（Linear Scale）**のグラフは、類似したハードウェアクラス内での性能比較に役立ちます。これらのグラフの生成方法や測定されたタスクの詳細については、コアリポジトリの[ベンチマーク詳細](https://github.com/automatika-robotics/kompass-core/blob/main/src/kompass_cpp/benchmarks/README.md)を参照してください。
+
+### 対数スケール（CPU vs GPU 比較）
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/automatika-robotics/kompass-core/main/docs/benchmark_log_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/automatika-robotics/kompass-core/main/docs/benchmark_log_light.png">
+  <img alt="対数スケールのベンチマーク結果" src="https://raw.githubusercontent.com/automatika-robotics/kompass-core/main/docs/benchmark_log_light.png">
+</picture>
+
+### 線形スケール（絶対時間）
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/automatika-robotics/kompass-core/main/docs/benchmark_abs_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/automatika-robotics/kompass-core/main/docs/benchmark_abs_light.png">
+  <img alt="線形スケールのベンチマーク結果" src="https://raw.githubusercontent.com/automatika-robotics/kompass-core/main/docs/benchmark_abs_light.png">
+</picture>
+
 
 # Kompassレシピ向けのダイナミックWeb UI
 
