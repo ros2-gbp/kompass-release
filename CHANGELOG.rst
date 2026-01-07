@@ -2,6 +2,11 @@
 Changelog for package kompass_interfaces
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+0.4.0 (2026-01-07)
+------------------
+* (fix) Adds number of point to path recording/saving service response
+* Contributors: ahr, mkabtoul
+
 0.3.3 (2025-11-30)
 ------------------
 
