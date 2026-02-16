@@ -1,0 +1,63 @@
+ros-jazzy-kompass-interfaces (0.4.1-1bookworm) bookworm; urgency=high
+
+
+
+ -- Automatika Robotics <contact@automatikarobotics.com>  Sun, 15 Feb 2026 23:00:00 -0000
+
+ros-jazzy-kompass-interfaces (0.4.0-1bookworm) bookworm; urgency=high
+
+  * (fix) Adds number of point to path recording/saving service response
+  * Contributors: ahr, mkabtoul
+
+ -- Automatika Robotics <contact@automatikarobotics.com>  Tue, 06 Jan 2026 23:00:00 -0000
+
+ros-jazzy-kompass-interfaces (0.3.3-1bookworm) bookworm; urgency=high
+
+
+
+ -- Automatika Robotics <contact@automatikarobotics.com>  Sat, 29 Nov 2025 23:00:00 -0000
+
+ros-jazzy-kompass-interfaces (0.3.2-1bookworm) bookworm; urgency=high
+
+  * (feature) Adds map server for serving static global map
+  * Contributors: ahr, mkabtoul
+
+ -- Automatika Robotics <contact@automatikarobotics.com>  Thu, 02 Oct 2025 22:00:00 -0000
+
+ros-jazzy-kompass-interfaces (0.3.1-1bookworm) bookworm; urgency=high
+
+
+
+ -- Automatika Robotics <contact@automatikarobotics.com>  Mon, 01 Sep 2025 22:00:00 -0000
+
+ros-jazzy-kompass-interfaces (0.3.0-1bookworm) bookworm; urgency=high
+
+  * (fix) Moves vision controller setup to component start
+  * (feature) Updates controller component to use VisionDWA from core
+  * Contributors: ahr, mkabtoul
+
+ -- Automatika Robotics <contact@automatikarobotics.com>  Tue, 01 Jul 2025 22:00:00 -0000
+
+ros-jazzy-kompass-interfaces (0.2.1-1bookworm) bookworm; urgency=high
+
+  * (fix) Adds action_msgs dependency for kompass_interfaces
+  * (feature) Adds support for 'None' default values of inputs/outputs
+  * (feature) Updates control classes and supported types
+  * (feature) Adds vision tracking action/srv and updates interfaces
+  * (feature) Adds control publishing options to Controller (#32 <https://github.com/automatika-robotics/kompass-ros/issues/32>)
+    Adds parallel and array publish options to Controller and updates docs
+  * (feature) Adds time_step to TwistArray msg
+  * Contributors: ahr, mkabtoul
+
+ -- Automatika Robotics <contact@automatikarobotics.com>  Mon, 27 Jan 2025 23:00:00 -0000
+
+ros-jazzy-kompass-interfaces (0.2.0-1bookworm) bookworm; urgency=high
+
+  * (fix) Adds correct paths for params in simulation launch files
+    Changes version number according to ROS convention
+  * Initial release 0.1.1a
+  * Contributors: ahr, mkabtoul
+
+ -- Automatika Robotics <contact@automatikarobotics.com>  Thu, 24 Oct 2024 22:00:00 -0000
+
+
