@@ -1,0 +1,12 @@
+Source: ros-jazzy-kompass
+Section: misc
+Priority: optional
+Maintainer: Automatika Robotics <contact@automatikarobotics.com>
+Build-Depends: debhelper (>= 9.0.0), python3-pykdl, ros-jazzy-automatika-ros-sugar, ros-jazzy-kompass-interfaces, ros-jazzy-ros-workspace, python3-all, python3-setuptools, dh-python
+Homepage: 
+Standards-Version: 3.9.2
+
+Package: ros-jazzy-kompass
+Architecture: any
+Depends: ${python3:Depends}, ${misc:Depends}, python3-pykdl, ros-jazzy-automatika-ros-sugar, ros-jazzy-kompass-interfaces, ros-jazzy-ros-workspace
+Description: Kompass: Event-driven navigation system
