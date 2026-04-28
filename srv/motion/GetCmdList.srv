@@ -1,5 +1,0 @@
-int32   number_of_cmds
-float64 time_step
-FollowPathRequest follow_path
----
-TwistArray  cmd_list
