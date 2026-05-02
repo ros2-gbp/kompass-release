@@ -1,8 +1,0 @@
-# Start path following msg
-FollowPathRequest request
----
-# Result
-bool reached_end
----
-# Feedback
-PathTrackingError tracking_error
