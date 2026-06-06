@@ -1,3 +1,28 @@
+## kompass (lyrical) - 0.6.0-1
+
+The packages in the `kompass` repository were released into the `lyrical` distro by running `/usr/bin/bloom-release --rosdistro lyrical kompass` on `Sat, 06 Jun 2026 07:56:53 -0000`
+
+These packages were released:
+- `kompass`
+- `kompass_interfaces`
+
+Version of package(s) in repository `kompass`:
+
+- upstream repository: https://github.com/automatika-robotics/kompass.git
+- release repository: https://github.com/ros2-gbp/kompass-release.git
+- rosdistro version: `0.4.1-3`
+- old version: `0.4.1-3`
+- new version: `0.6.0-1`
+
+Versions of tools used:
+
+- bloom version: `0.14.3`
+- catkin_pkg version: `1.1.0`
+- rosdep version: `0.26.0`
+- rosdistro version: `1.0.1`
+- vcstools version: `0.1.42`
+
+
 ## kompass (kilted) - 0.6.0-1
 
 The packages in the `kompass` repository were released into the `kilted` distro by running `/usr/bin/bloom-release --rosdistro kilted kompass` on `Sat, 06 Jun 2026 07:48:16 -0000`
