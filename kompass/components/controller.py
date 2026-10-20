@@ -1,6 +1,7 @@
 from typing import Optional, Union, List, Dict, Any
+import threading
 import time
-from attrs import define, field
+from attrs import define, field, fields
 from queue import Queue, Empty
 import numpy as np
 
@@ -9,12 +10,16 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 
 # ROS MSGS
 from nav_msgs.msg import Path
-from sensor_msgs.msg import PointCloud2
 from geometry_msgs.msg import PoseStamped
 
 # KOMPASS
-from kompass_core.models import Robot, RobotCtrlLimits, RobotState
-from kompass_core.datatypes import LaserScanData, PointCloudData
+from kompass_core.models import Robot, RobotState
+from ros_sugar.io import (
+    LaserScanData,
+    PointCloudCallback,
+    LaserScanCallback,
+    PointCloudData,
+)
 from kompass_core.utils.geometry import from_euler_to_quaternion
 from kompass_core.control import (
     ControlClasses,
@@ -35,8 +40,7 @@ from .ros import (
     Topic,
     update_topics,
 )
-from ..utils import component_action
-from ..callbacks import PointCloudCallback
+from ..utils import ActionReturnType, component_action
 
 # KOMPASS MSGS/SRVS/ACTIONS
 from .component import Component, TFListener
@@ -84,6 +88,10 @@ class ControllerConfig(ComponentConfig):
     * - **ctrl_publish_type**
       - `CmdPublishType | str`, `TWIST_ARRAY`
       - How to publish the control commands
+
+    * - **vision_depth_max_age**
+      - `float`, `0.2`
+      - Largest stamp difference (s) between the vision detections and the separate depth input (`vision_depth`) for the two to be paired; older depth is not used
     ```
     """
 
@@ -100,6 +108,11 @@ class ControllerConfig(ComponentConfig):
         default=False
     )  # Turn on debug mode -> published additional data visualization
     use_direct_sensor: bool = field(default=False)
+    # Separate depth input paired with the detections. Both publishers must stamp
+    # with the same clock.
+    vision_depth_max_age: float = field(
+        default=0.2, validator=BaseValidators.in_range(min_value=0.0, max_value=1e3)
+    )
     ctrl_publish_type: Union[str, CmdPublishType] = field(
         default=CmdPublishType.TWIST_ARRAY,
         converter=lambda value: (
@@ -152,10 +165,20 @@ class Controller(Component):
       - 1
       - `Topic(name="/local_map/occupancy_layer", msg_type="OccupancyGrid")`
 
-    * - vision_tracking
-      - [`automatika_embodied_agents.msg.Trackings`](https://github.com/automatika-robotics/ros-agents/tree/main/agents_interfaces/msg), [`automatika_embodied_agents.msg.Detections2D`](https://github.com/automatika-robotics/ros-agents/tree/main/agents_interfaces/msg)
+    * - vision_detections
+      - [`automatika_embodied_agents.msg.Trackings`](https://github.com/automatika-robotics/embodied-agents/tree/main/msg), [`automatika_embodied_agents.msg.Detections2D`](https://github.com/automatika-robotics/embodied-agents/tree/main/msg)
       - 1
-      - `Topic(name="/trackings", msg_type="Trackings")`
+      - `None` (required for the vision tracking action)
+
+    * - depth_camera_info
+      - [`sensor_msgs.msg.CameraInfo`](https://docs.ros.org/en/noetic/api/sensor_msgs/html/msg/CameraInfo.html)
+      - 1
+      - `None` (required for the vision tracking action)
+
+    * - vision_depth
+      - [`sensor_msgs.msg.Image`](https://docs.ros.org/en/noetic/api/sensor_msgs/html/msg/Image.html) (depth image aligned with the detection camera), [`sensor_msgs.msg.PointCloud2`](http://docs.ros.org/en/noetic/api/sensor_msgs/html/msg/PointCloud2.html)
+      - 1
+      - `None` (optional: lifts the detections to 3D instead of the depth embedded in the detections message)
     ```
 
     ## Outputs:
@@ -185,7 +208,7 @@ class Controller(Component):
       - 1
       - ```Topic(name="/local_path", msg_type="Path")```
     * - tracked_point
-      - [`nav_msgs.msg.Odometry`](https://docs.ros.org/en/noetic/api/nav_msgs/html/msg/Odometry.html), [`geometry_msgs.msg.PoseStamped`](http://docs.ros.org/en/jade/api/geometry_msgs/html/msg/PoseStamped.html), [`geometry_msgs.msg.Pose`](http://docs.ros.org/en/jade/api/geometry_msgs/html/msg/Pose.html)[`automatika_embodied_agents.msg.Detection2D`](https://github.com/automatika-robotics/ros-agents/tree/main/agents_interfaces/msg)
+      - [`nav_msgs.msg.Odometry`](https://docs.ros.org/en/noetic/api/nav_msgs/html/msg/Odometry.html), [`geometry_msgs.msg.PoseStamped`](http://docs.ros.org/en/jade/api/geometry_msgs/html/msg/PoseStamped.html), [`geometry_msgs.msg.Pose`](http://docs.ros.org/en/jade/api/geometry_msgs/html/msg/Pose.html)[`automatika_embodied_agents.msg.Detection2D`](https://github.com/automatika-robotics/embodied-agents/tree/main/msg)
       - 1
       - ```Topic(name="/tracked_point", msg_type="PoseStamped")```
     ```
@@ -229,6 +252,9 @@ class Controller(Component):
         **kwargs,
     ) -> None:
         self.config: ControllerConfig = config or ControllerConfig()
+        # NOTE: If a new plan arrives on the subscription thread while the control step runs on another with the
+        # GIL released, and setting a path destroys the one the step is reading.
+        self._core_lock = threading.RLock()  # Held for every touch of the core's path
 
         # Update defaults from custom topics if provided
         in_topics = (
@@ -300,6 +326,11 @@ class Controller(Component):
             )
         # Create subscribers
         for callback in self.callbacks.values():
+            # Callbacks are rebuilt above, so the resolvers behind
+            # transform_inputs_to have to be re-attached to the new ones.
+            # Frame handling applies to plugin-fed non-ROS inputs too
+            self._attach_transform_provider(callback.input_topic.name, callback)
+
             # Inputs bound to a non-ROS robot plugin transport are fed through
             # the feedback bus, not a ROS subscription
             if callback.input_topic.name in self._external_topics:
@@ -510,7 +541,8 @@ class Controller(Component):
         if not self._path_controller:
             return None
 
-        tracked_state: Optional[RobotState] = self._path_controller.tracked_state
+        with self._core_lock:
+            tracked_state: Optional[RobotState] = self._path_controller.tracked_state
 
         if not tracked_state:
             return None
@@ -532,7 +564,8 @@ class Controller(Component):
         """
         # NOTE: For now only DWA provides a local plan
         if self.algorithm == ControllersID.DWA and self._path_controller:
-            kompass_cpp_path = self._path_controller.optimal_path()
+            with self._core_lock:
+                kompass_cpp_path = self._path_controller.optimal_path()
             if not kompass_cpp_path:
                 return None
 
@@ -569,11 +602,12 @@ class Controller(Component):
         if self.algorithm != ControllersID.DWA or not self._path_controller:
             return None
 
-        # If result is not processed -> no debug is available yet
-        if not self._path_controller.has_result():
-            return
+        with self._core_lock:
+            # If result is not processed -> no debug is available yet
+            if not self._path_controller.has_result():
+                return
 
-        (paths_x, paths_y) = self._path_controller.planner.get_debugging_samples()
+            (paths_x, paths_y) = self._path_controller.planner.get_debugging_samples()
 
         if paths_x is None:
             return None
@@ -606,7 +640,8 @@ class Controller(Component):
         """
         if not self._path_controller:
             return None
-        kompass_cpp_path = self._path_controller.interpolated_path()
+        with self._core_lock:
+            kompass_cpp_path = self._path_controller.interpolated_path()
         if not kompass_cpp_path:
             return None
         ros_path = Path()
@@ -636,6 +671,10 @@ class Controller(Component):
         :param value: Use direct sensor data flag
         :type value: bool
         """
+        # Reset sensor mount pose if the direct sensor flag is changed
+        if value != self.config.use_direct_sensor:
+            self._sensor_mount_pose_set = False
+
         # Note: Only DWA takes local map
         if (
             self.algorithm
@@ -728,28 +767,27 @@ class Controller(Component):
             },
         }
     )
-    def set_algorithm(self, algorithm_value: Union[str, ControllersID], **_) -> bool:
+    def set_algorithm(
+        self, algorithm_value: Union[str, ControllersID], **_
+    ) -> ActionReturnType:
         """
         Component action - Set controller algorithm action
 
         :param algorithm_value: algorithm value
         :type algorithm_value: Union[str, ControllersID]
 
-        :raises Exception: Exception while updating algorithm value
-
-        :return: Success
-        :rtype: bool
+        :return: Success, with the reason when the algorithm could not be set
+        :rtype: ActionReturnType
         """
-        if self.algorithm in [ControllersID(algorithm_value), algorithm_value]:
-            return True
         try:
+            if self.algorithm in [ControllersID(algorithm_value), algorithm_value]:
+                return True, f"Controller algorithm is already '{algorithm_value}'"
             self.algorithm = algorithm_value
         except Exception as e:
-            self.get_logger().error(
-                f"Failed to set controller algorithm to '{algorithm_value}': {e}"
-            )
-            return False
-        return True
+            error = f"Failed to set controller algorithm to '{algorithm_value}': {e}"
+            self.get_logger().error(error)
+            return False, error
+        return True, f"Controller algorithm set to '{algorithm_value}'"
 
     def _activate_vision_mode(self):
         """Activate object following mode using vision detections"""
@@ -779,6 +817,9 @@ class Controller(Component):
 
         self.custom_create_all_subscribers()
         self.custom_create_all_action_servers()
+        # Set up the vision controller eagerly to avoid first-call overhead
+        # in the action server.
+        self._vision_follower.setup()
 
     def _activate_follower_mode(self):
         """Activate path following mode by creating all missing subscriptions"""
@@ -804,32 +845,81 @@ class Controller(Component):
         self.custom_create_all_subscribers()
         self.custom_create_all_action_servers()
 
-    def _update_sensor_data(self) -> None:
-        """Update sensor data from the sensor callback"""
+    @property
+    def _sensor_tf_listener(self) -> Optional[TFListener]:
+        """Transform listener from the proximity sensor frame to the robot body.
+
+        Resolved from the sensor data's own frame, so it is None until the
+        first message arrives. This is the mount pose the core needs to place a
+        laser scan; it is not used to transform the data here.
+        """
+        return self.input_tf_listener(
+            TopicsKeys.SPATIAL_SENSOR, self.config.frames.robot_base, static_tf=True
+        )
+
+    def _update_sensor_data(self) -> bool:
+        """Update sensor data from the sensor callback.
+
+        A laser scan is left in the sensor frame. Cartesian obstacles, a point
+        cloud or local map cells are asked for in the world frame.
+
+        :return: Whether the obstacle input could be delivered in the frame the
+            core expects. False leaves the controller without obstacles for this
+            step rather than placing them wrongly
+        :rtype: bool
+        """
         if self.direct_sensor:
             self.local_map = None
             sensor_callback = self.get_callback(TopicsKeys.SPATIAL_SENSOR)
-            self.sensor_data = (
-                sensor_callback.get_output(
-                    transformation=self._sensor_tf_listener.transform
-                    if self._sensor_tf_listener
-                    else None
+            if not sensor_callback:
+                self.sensor_data = None
+                return True
+
+            if not isinstance(sensor_callback, PointCloudCallback):
+                # A laser scan belongs in the sensor frame
+                self.sensor_data = sensor_callback.get_output()
+                return True
+
+            deliverable, transform = self.resolve_input_tf(TopicsKeys.SPATIAL_SENSOR)
+            if not deliverable:
+                self.sensor_data = None
+                self.get_logger().error(
+                    f"Point cloud is published in the '{sensor_callback.frame_id}' "
+                    f"frame but its transform to '{self.config.frames.world}' is "
+                    "not available -> dropping it rather than placing obstacles "
+                    "in the wrong frame",
+                    throttle_duration_sec=5.0,
                 )
-                if sensor_callback
-                else None
+                return False
+            self.sensor_data = sensor_callback.get_output(transformation=transform)
+            return True
+
+        self.sensor_data = None
+        map_callback = self.get_callback(TopicsKeys.LOCAL_MAP)
+        if not map_callback:
+            self.local_map = None
+            self.local_map_resolution = None
+            return True
+
+        # Metadata is read off the message itself, so it needs no transform
+        _metadata = map_callback.get_output(get_metadata=True)
+        self.local_map_resolution = _metadata["resolution"] if _metadata else None
+
+        deliverable, transform = self.resolve_input_tf(TopicsKeys.LOCAL_MAP)
+        if not deliverable:
+            self.local_map = None
+            self.get_logger().error(
+                f"Local map is published in the '{map_callback.frame_id}' frame "
+                f"but its transform to '{self.config.frames.world}' is not "
+                "available -> dropping it rather than placing obstacles in the "
+                "wrong frame",
+                throttle_duration_sec=5.0,
             )
-        else:
-            self.sensor_data = None
-            map_callback = self.get_callback(TopicsKeys.LOCAL_MAP)
-            if map_callback:
-                self.local_map: Optional[np.ndarray] = map_callback.get_output()
-                _metadata = map_callback.get_output(get_metadata=True)
-                self.local_map_resolution = (
-                    _metadata["resolution"] if _metadata else None
-                )
-            else:
-                self.local_map = None
-                self.local_map_resolution = None
+            return False
+        self.local_map: Optional[np.ndarray] = map_callback.get_output(
+            transformation=transform
+        )
+        return True
 
     def _read_robot_state(self) -> Optional[RobotState]:
         """Helper method to read the robot state from the location topic"""
@@ -837,10 +927,9 @@ class Controller(Component):
         if not state_callback:
             return None
         kw = {"get_front": True, "clear_last": True}
-        if self.config.frames.odom != self.config.frames.world:
-            kw["transformation"] = (
-                self.odom_tf_listener.transform if self.odom_tf_listener else None
-            )
+        kw["transformation"] = (
+            self.odom_tf_listener.transform if self.odom_tf_listener else None
+        )
         return state_callback.get_output(**kw)
 
     def _update_state(self, block: bool = True) -> None:
@@ -848,40 +937,69 @@ class Controller(Component):
         Updates node inputs from associated callbacks.
 
         :param block: If True, blocks up to ``topic_subscription_timeout`` waiting
-            for the odom->world TF when the two frames differ. Pass ``False`` from
-            fast control loops to read the latest cached transform without blocking;
-            if the TF is not yet available the update is skipped for this tick.
+            for a robot location message and then for the transform from its own
+            frame to the world frame. Pass ``False`` from fast control loops to
+            read the latest cached transform without blocking; if the TF is not
+            yet available the update is skipped for this tick.
         """
         if self.config._mode == ControllerMode.PATH_FOLLOWER:
-            plan_callback = self.get_callback(TopicsKeys.GLOBAL_PLAN)
-            self.plan: Optional[Path] = (
-                plan_callback.get_output() if plan_callback else None
-            )
+            self.plan: Optional[Path] = self._read_plan()
 
         # In LOCAL frame mode robot state is irrelevant: sensor data and
         # tracked targets are reasoned about robot-relative.
-        if (
-            block
-            and self.config._frame_mode == FrameMode.GLOBAL
-            and self.config.frames.odom != self.config.frames.world
-        ):
+        if block and self.config._frame_mode == FrameMode.GLOBAL:
             timeout = 0.0
-            odom_listener = self.odom_tf_listener
+            step = 1 / self.config.loop_rate
+            state_callback = self.get_callback(TopicsKeys.ROBOT_LOCATION)
+
+            # The location frame is carried by the messages, so wait for one to
+            # arrive before waiting for its transform. Both waits share a single
+            # timeout budget.
             while (
-                not odom_listener.transform
+                state_callback
+                and not state_callback.got_msg
                 and timeout < self.config.topic_subscription_timeout
             ):
                 self.get_logger().warning(
-                    f"Waiting to get TF from {self.config.frames.odom} frame to {self.config.frames.world} frame...",
+                    "Waiting for a robot location message...", once=True
+                )
+                timeout += step
+                time.sleep(step)
+
+            if (
+                state_callback
+                and state_callback.got_msg
+                and not state_callback.frame_id
+            ):
+                # A bare Pose carries no header, so there is no frame to look up
+                # and nothing to transform: take the data as it arrived.
+                self.get_logger().warning(
+                    "Robot location messages carry no frame_id -> treating them as "
+                    f"already expressed in the '{self.config.frames.world}' frame",
                     once=True,
                 )
-                timeout += 1 / self.config.loop_rate
-                time.sleep(1 / self.config.loop_rate)
-            if not self.odom_tf_listener.transform:
-                self.get_logger().error(
-                    f"Could not get TF from {self.config.frames.odom} frame to {self.config.frames.world} frame after {self.config.topic_subscription_timeout} seconds"
-                )
-                return
+            else:
+                odom_listener = self.odom_tf_listener
+                while (
+                    odom_listener
+                    and not odom_listener.transform
+                    and timeout < self.config.topic_subscription_timeout
+                ):
+                    self.get_logger().warning(
+                        f"Waiting to get TF from {odom_listener.config.source_frame} "
+                        f"frame to {self.config.frames.world} frame...",
+                        once=True,
+                    )
+                    timeout += step
+                    time.sleep(step)
+
+                if not odom_listener or not odom_listener.transform:
+                    self.get_logger().error(
+                        "Could not get TF from the robot location frame to "
+                        f"'{self.config.frames.world}' frame after "
+                        f"{self.config.topic_subscription_timeout} seconds"
+                    )
+                    return
         self.robot_state = self._read_robot_state()
         if block:
             waited = 0.0
@@ -903,30 +1021,83 @@ class Controller(Component):
         if plan_callback:
             plan_callback.on_callback_execute(self._set_path_to_controller)
 
-        if self.direct_sensor:
-            # If direct sensor information is used set maximum range for PointCloud data
-            sensor_callback = self.get_callback(TopicsKeys.SPATIAL_SENSOR)
-            if isinstance(sensor_callback, PointCloudCallback):
-                sensor_callback.max_range = (
-                    self.config.prediction_horizon * self.robot.ctrl_vx_limits.max_vel
-                )
-                self.get_logger().info(
-                    f"Setting PointCloud max range to robot max forward horizon '{sensor_callback.max_range}' to limit computations"
-                )
+    def _read_plan(self) -> Optional[Path]:
+        """Read the global plan, in the world frame the core tracks against.
 
-    def _set_path_to_controller(self, msg, **_) -> None:
+        The plan is either in the world frame, or there is no plan.
+
+        :return: The plan in the world frame, or None if there is none or it
+            cannot be brought there yet
+        :rtype: Optional[Path]
+        """
+        plan_callback = self.get_callback(TopicsKeys.GLOBAL_PLAN)
+        if not plan_callback:
+            return None
+
+        deliverable, transform = self.resolve_input_tf(TopicsKeys.GLOBAL_PLAN)
+        if not deliverable:
+            self.get_logger().error(
+                f"Global plan is published in the '{plan_callback.frame_id}' "
+                f"frame but its transform to '{self.config.frames.world}' is "
+                "not available -> dropping this plan",
+                throttle_duration_sec=5.0,
+            )
+            return None
+        return plan_callback.get_output(transformation=transform)
+
+    def _set_path_to_controller(self, output, **_) -> None:
         """
         Set a new plan to the controller/follower
+
+        The plan arrives already expressed in the world frame: the component
+        asks for this input in ``frames.world`` and the callback transforms it.
         """
+        deliverable, _ = self.resolve_input_tf(TopicsKeys.GLOBAL_PLAN)
+        if output is None or not deliverable:
+            self.get_logger().error(
+                "Global plan cannot be expressed in the "
+                f"'{self.config.frames.world}' frame -> dropping this plan",
+                throttle_duration_sec=5.0,
+            )
+            return
+        self._install_plan(output)
+        if len(output.poses) < 2:
+            # Length is less than 2 when a planner has reached the end, or it is an invalid plan. The core clears its own path when given fewer than two poses, so the robot stops.
+            self.get_logger().info(
+                "Received a global plan with no path to track -> stopping the robot"
+            )
+            self._end_path_tracking()
+
+    def _install_plan(self, plan: Path) -> bool:
+        """Hand a world-frame plan to the core and take the goal point from it.
+
+        Shared by the arrival hook and the retry in ``_path_control``.
+        A plan that reaches the core must always bring its goal point with it.
+
+        :param plan: Global plan, already in the world frame
+        :type plan: Path
+
+        :return: Whether the core came away with a path to track
+        :rtype: bool
+        """
+        self.plan = plan
         self._reached_end = False
-        if self._path_controller:
-            self._path_controller.set_path(global_path=msg)
-        if len(msg.poses) > 1:
+
+        if len(plan.poses) > 1:
             self._goal_point = RobotState(
-                x=msg.poses[-1].pose.position.x, y=msg.poses[-1].pose.position.y
+                x=plan.poses[-1].pose.position.x, y=plan.poses[-1].pose.position.y
             )
         else:
+            # Fewer than two poses is "no goal"
             self._goal_point = None
+
+        if self._path_controller is None:
+            return False
+
+        # Handed over whatever its length, the core handles the length
+        with self._core_lock:
+            self._path_controller.set_path(global_path=plan)
+            return bool(self._path_controller.path)
 
     def init_variables(self):
         """
@@ -940,19 +1111,14 @@ class Controller(Component):
         )
         self.plan: Optional[Path] = None  # robot plan (global path)
 
+        self.transform_inputs_to(TopicsKeys.GLOBAL_PLAN, self.config.frames.world)
+
         # INIT PATH CONTROLLER
         self._robot = Robot(
-            robot_type=self.config.robot.model_type,
-            geometry_type=self.config.robot.geometry_type,
-            geometry_params=self.config.robot.geometry_params,
+            robot_type=self.robot.model_type,
+            geometry_type=self.robot_geometry_type,
+            geometry_params=self.robot.geometry_params,
             state=self.robot_state or RobotState(),
-        )
-
-        # SET robot control limits
-        self._robot_ctr_limits = RobotCtrlLimits(
-            vx_limits=self.config.robot.ctrl_vx_limits,
-            vy_limits=self.config.robot.ctrl_vy_limits,
-            omega_limits=self.config.robot.ctrl_omega_limits,
         )
 
         self._reached_end = False
@@ -960,50 +1126,114 @@ class Controller(Component):
         self._ori_error: float = 0.0
 
         # Vision tracking lifecycle helper (owns _vision_controller, detections,
-        # depth image and tracked-target state). Always instantiated; dormant
-        # in path follower mode.
+        # depth image and tracked-target state). Dormant in path follower mode.
         self._vision_follower = VisionFollower(self)
 
         # Command queue to send controller command list to the robot
         self._cmds_queue: Queue = Queue()
 
-        if self.direct_sensor:
-            sensor_topic = self._inputs_list[
-                self._inputs_keys.index(TopicsKeys.SPATIAL_SENSOR)
-            ]
-            # Setup transform listener
-            self._sensor_tf_listener: TFListener = (
-                self.pc_tf_listener
-                if sensor_topic.msg_type._ros_type == PointCloud2
-                else self.scan_tf_listener
-            )
+        self.sensor_data: Optional[Union[LaserScanData, PointCloudData]] = None
 
-            self.sensor_data: Optional[Union[LaserScanData, PointCloudData]] = None
+        # NOTE: Obstacle inputs are handed to the core in the frame it expects for
+        # that input type, and the core does the rest:
+        #
+        #  - a laser scan stays in the **sensor frame**. The core lifts it into
+        #    the world itself, from the mount pose it is given at construction
+        #    and the robot's world pose. So no transform is requested here.
+        #  - cartesian obstacles, whether a decoded point cloud or local map
+        #    cells, are handed over in the **world frame** and used untouched.
+        #
+        # Both are registered regardless of `use_direct_sensor`, since it can be
+        # flipped at runtime and only the subscribed input ever resolves one.
+        if isinstance(self.get_callback(TopicsKeys.SPATIAL_SENSOR), PointCloudCallback):
+            self.transform_inputs_to(
+                TopicsKeys.SPATIAL_SENSOR, self.config.frames.world
+            )
+        self.transform_inputs_to(TopicsKeys.LOCAL_MAP, self.config.frames.world)
 
         self._path_controller: Optional[ControllerType] = None
+        # The sensor mount pose is only knowable once a scan has arrived, and
+        # the core takes it at construction -> see _apply_sensor_mount_pose
+        self._sensor_mount_pose_set: bool = False
 
         if self.config._mode == ControllerMode.PATH_FOLLOWER:
-            config_kwargs = {}
-            if self.direct_sensor and self._sensor_tf_listener.got_transform:
-                config_kwargs["proximity_sensor_position_to_robot"] = (
-                    self._sensor_tf_listener.translation
-                )
-                config_kwargs["proximity_sensor_rotation_to_robot"] = (
-                    self._sensor_tf_listener.rotation
-                )
-                config_kwargs["control_time_step"] = self.config.control_time_step
-            # Get default controller configuration and update it from user defined config
-            _controller_config = self._configure_algorithm(
-                ControlConfigClasses[self.algorithm](**config_kwargs)
-            )
+            self._build_path_controller()
 
-            self._path_controller = ControlClasses[self.algorithm](
-                robot=self._robot,
-                config=_controller_config,
-                ctrl_limits=self._robot_ctr_limits,
-                config_file=self._config_file,
-                config_root_name=f"{self.node_name}.{self.config.algorithm}",
-                control_time_step=self.config.control_time_step,
+    def _build_path_controller(self, **config_kwargs) -> None:
+        """(Re)build the core algorithm object.
+
+        :param config_kwargs: Algorithm config overrides, used to pass the
+            sensor mount pose once it is known
+        """
+        config_class = ControlConfigClasses[self.algorithm]
+        # Check for acceptance since the config classes do not all share the same common set of fields
+        accepted = {attribute.name.lstrip("_") for attribute in fields(config_class)}
+        dropped = set(config_kwargs) - accepted
+        if dropped:
+            self.get_logger().debug(
+                f"'{self.algorithm}' config takes no {sorted(dropped)} -> ignored"
+            )
+        # Get default controller configuration and update it from user defined config
+        _controller_config = self._configure_algorithm(config_class())
+
+        # Update with given config arguments, if any.
+        # This is used to pass the sensor mount pose once it is known.
+        for name, value in config_kwargs.items():
+            if name in accepted:
+                setattr(_controller_config, name, value)
+
+        self._path_controller = ControlClasses[self.algorithm](
+            robot=self._robot,
+            config=_controller_config,
+            ctrl_limits=self.robot_ctrl_limits,
+            config_file=self._config_file,
+            config_root_name=f"{self.node_name}.{self.config.algorithm}",
+            control_time_step=self.config.control_time_step,
+        )
+
+    def _apply_sensor_mount_pose(self) -> None:
+        """Hand the sensor-to-body mount pose to the core, once it is known.
+
+        Only a laser scan needs it: it reaches the core in the sensor frame, so
+        the core cannot place it without the mount pose. The pose comes from the
+        scan's own ``frame_id``, so it cannot be resolved before the first
+        message, and the core takes it at construction -- hence the one-time
+        rebuild here rather than at ``init_variables`` time.
+        """
+        if self._sensor_mount_pose_set or self._path_controller is None:
+            return
+
+        if not self.direct_sensor or not isinstance(
+            self.get_callback(TopicsKeys.SPATIAL_SENSOR), LaserScanCallback
+        ):
+            # If a map is being used or direct sensor data is not laserscan, the core does not need a mount pose and can be built once at init time
+            self._sensor_mount_pose_set = True
+            return
+
+        sensor_tf = self._sensor_tf_listener
+        if not sensor_tf or not sensor_tf.got_transform:
+            self.get_logger().warning(
+                "Waiting for the transform from the laser scan frame to "
+                f"'{self.config.frames.robot_base}' to place the scan...",
+                throttle_duration_sec=5.0,
+            )
+            return
+
+        self._build_path_controller(
+            proximity_sensor_position_to_robot=sensor_tf.translation,
+            proximity_sensor_rotation_to_robot=sensor_tf.rotation,
+        )
+        self._sensor_mount_pose_set = True
+        # The rebuild dropped the path the previous object was tracking.
+        # `self.plan` is the guarded world-frame read refreshed by
+        # `_update_state` just above, so this cannot install a wrong-frame path
+        if self.plan is not None:
+            with self._core_lock:
+                self._path_controller.set_path(global_path=self.plan)
+        else:
+            self.get_logger().warning(
+                "No global plan available while applying the scan mount pose "
+                "-> the rebuilt controller starts without a path"
             )
 
     def _stop_robot(self):
@@ -1018,6 +1248,46 @@ class Controller(Component):
             self.get_publisher(TopicsKeys.INTERMEDIATE_CMD_LIST).publish(_cmd_vel_array)
         else:
             self.get_publisher(TopicsKeys.INTERMEDIATE_CMD).publish([0.0, 0.0, 0.0])
+
+    @component_action(
+        description={
+            "type": "function",
+            "function": {
+                "name": "stop_path_tracking",
+                "description": "Stop following the current path and stop the robot. "
+                "The controller stays idle until a new path is received. "
+                "Use when the robot should stop and hold its position.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    )
+    def stop_path_tracking(self, **_) -> ActionReturnType:
+        """Ends tracking of the current path, as if its end was reached, and
+        stops the robot. A new plan resumes tracking
+
+        :return: Always succeeds
+        :rtype: ActionReturnType
+        """
+        self._end_path_tracking()
+        return True, "Path tracking stopped"
+
+    def _end_path_tracking(self) -> None:
+        """Stop following the current path, as if its end was reached, and
+        stop the robot. A new plan resumes tracking"""
+        self._reached_end = True
+        plan_callback = self.get_callback(TopicsKeys.GLOBAL_PLAN)
+        if plan_callback:
+            plan_callback.clear_last_msg()
+        # Under the lock, so a step already computing finishes first: its
+        # command would otherwise go out after the robot was told to stop.
+        # The core keeps tracking whatever path it holds, so that goes too --
+        # a path of fewer than two poses is how it is told to let go
+        with self._core_lock:
+            if self._path_controller is not None:
+                self._path_controller.set_path(global_path=Path())
+            self.plan = None
+            self._goal_point = None
+        self._stop_robot()
 
     def _publish(
         self,
@@ -1074,31 +1344,48 @@ class Controller(Component):
         clearing the plan callback, aborting the action, etc.).
         """
         if self._path_controller is None:
+            self.get_logger().debug(
+                "Path controller is not initialized -> skipping control step"
+            )
             return PathControlStatus.IDLE
 
-        if not self._path_controller.path:
-            # No global path -> nothing to control toward
-            return PathControlStatus.IDLE
+        with self._core_lock:
+            has_path = bool(self._path_controller.path)
+        if not has_path:
+            plan = self._read_plan()
+            # No plan is set to the controller -> read plan from callback
+            if (plan is None) or (not self._install_plan(plan)):
+                # Plan is not available or rejected by the core, which needs at least two poses
+                self.get_logger().debug(
+                    "Plan is not available or rejected by the core -> skipping control step"
+                )
+                return PathControlStatus.IDLE
 
         self._update_state(block=True)
-        self._update_sensor_data()
+        obstacles_deliverable = self._update_sensor_data()
+        self._apply_sensor_mount_pose()
 
-        if not self.robot_state:
+        if not obstacles_deliverable or not self.robot_state:
             self.get_logger().warning(
-                f"Robot state unavailable after {self.config.topic_subscription_timeout}s -> skipping control step",
+                f"State or sensor data unavailable after {self.config.topic_subscription_timeout}s -> skipping control step",
                 throttle_duration_sec=5.0,
             )
+            # Obstacles exist but could not be put in the frame the core reads
             return PathControlStatus.WAITING_INPUTS
 
-        laser_scan = None
-        point_cloud = None
+        ranges = None
+        angles = None
+        points = None
         local_map = None
 
         if self.direct_sensor:
             if isinstance(self.sensor_data, LaserScanData):
-                laser_scan = self.sensor_data
-            else:
-                point_cloud = self.sensor_data
+                ranges = self.sensor_data.ranges
+                angles = self.sensor_data.angles
+            elif isinstance(self.sensor_data, PointCloudData):
+                # The controller works on cartesian obstacle points, decoded
+                # from the raw buffer by the container and cached there
+                points = self.sensor_data.xyz
         else:
             local_map = self.local_map
 
@@ -1106,32 +1393,48 @@ class Controller(Component):
             self._stop_robot()
             return PathControlStatus.GOAL_REACHED
 
-        cmd_found: bool = self._path_controller.loop_step(
-            current_state=self.robot_state,  # type: ignore
-            laser_scan=laser_scan,
-            point_cloud=point_cloud,
-            local_map=local_map,
-            local_map_resolution=getattr(self, "local_map_resolution", None),
-            debug=self.config.debug,
-        )
+        # The core computes with the GIL released, so its path stays this
+        # thread's until the commands that came out of it have been read
+        with self._core_lock:
+            cmd_found: bool = self._path_controller.loop_step(
+                current_state=self.robot_state,  # type: ignore
+                ranges=ranges,
+                angles=angles,
+                points=points,
+                local_map=local_map,
+                local_map_resolution=getattr(self, "local_map_resolution", None),
+                debug=self.config.debug,
+            )
 
-        # LOG CONTROLLER INFO
-        self.get_logger().debug(f"{self._path_controller.logging_info()}")
+            # LOG CONTROLLER INFO
+            self.get_logger().debug(
+                f"Controller cmd_found={cmd_found}, Info: {self._path_controller.logging_info()}"
+            )
 
-        if not cmd_found:
-            return PathControlStatus.FAILED
+            if not cmd_found:
+                # NOTE: The core reports the end of the path the same way as a failure to
+                # find a command: no command.
+                if self._path_controller.reached_end():
+                    self._stop_robot()
+                    return PathControlStatus.GOAL_REACHED
+                self.get_logger().error(
+                    "Controller failed to compute a valid command -> stopping robot"
+                )
+                return PathControlStatus.FAILED
+
+            # Update controller path tracking info (errors)
+            self._lat_dist_error = self._path_controller.distance_error
+            self._ori_error = self._path_controller.orientation_error
+            commands = (
+                self._path_controller.linear_x_control,
+                self._path_controller.linear_y_control,
+                self._path_controller.angular_control,
+            )
 
         self.health_status.set_healthy()
-
-        # Update controller path tracking info (errors)
-        self._lat_dist_error = self._path_controller.distance_error
-        self._ori_error = self._path_controller.orientation_error
-
-        self._publish(
-            self._path_controller.linear_x_control,
-            self._path_controller.linear_y_control,
-            self._path_controller.angular_control,
-        )
+        # Published outside the lock: a TWIST_SEQUENCE publish sleeps between
+        # commands, and a plan on its way in should not wait for that
+        self._publish(*commands)
 
         return PathControlStatus.RUNNING
 
@@ -1144,6 +1447,7 @@ class Controller(Component):
         return [
             self.in_topic_name(TopicsKeys.VISION_DETECTIONS),
             self.in_topic_name(TopicsKeys.DEPTH_CAM_INFO),
+            self.in_topic_name(TopicsKeys.VISION_DEPTH),
         ]
 
     def _end_vision_tracking_srv_callback(
@@ -1185,18 +1489,10 @@ class Controller(Component):
                 goal_handle.abort()
                 return result
 
-            # Get default controller configuration and update it from user defined config
-            _controller_config = self._configure_algorithm(
-                ControlConfigClasses[self.algorithm]()
-            )
-
-            self._path_controller = ControlClasses[self.algorithm](
-                robot=self._robot,
-                config=_controller_config,
-                ctrl_limits=self._robot_ctr_limits,
-                config_file=self._config_file,
-                config_root_name=f"{self.node_name}.{self.config.algorithm}",
-            )
+            # A different algorithm means a fresh object, so the mount pose has
+            # to be handed to it again on the next control step
+            self._sensor_mount_pose_set = False
+            self._build_path_controller()
             self.get_logger().info(f"Initialized '{self.algorithm}' controller")
         else:
             self.get_logger().warning(
@@ -1217,15 +1513,36 @@ class Controller(Component):
         # Note: This will automatically end the vision target tracking action if it is ongoing
         self.config._mode = ControllerMode.PATH_FOLLOWER
 
-        self._path_controller.set_path(self.plan)  # type: ignore
+        deliverable, _ = self.resolve_input_tf(TopicsKeys.GLOBAL_PLAN)
+        if not deliverable:
+            self.get_logger().error(
+                "Global plan is not available in the world frame -> Aborting"
+            )
+            goal_handle.abort()
+            return result
+        # Refresh where possible: in ACTION_SERVER mode nothing has run
+        # _update_state yet, so `self.plan` may be stale at this point
+        if (_plan := self._read_plan()) is not None:
+            self.plan = _plan
+        with self._core_lock:
+            self._path_controller.set_path(self.plan)  # type: ignore
 
         self._reached_end: bool = False
+        # Told apart from a stop coming from outside, which sets the same latch
+        reached = False
 
         while True:
+            if self._reached_end:
+                self.get_logger().info(
+                    "Path tracking was stopped -> ending the goal"
+                )
+                break
+
             status: PathControlStatus = self._path_control()
 
             if status == PathControlStatus.GOAL_REACHED:
                 self._reached_end = True
+                reached = True
                 break
             if status in (PathControlStatus.FAILED, PathControlStatus.IDLE):
                 break
@@ -1243,7 +1560,6 @@ class Controller(Component):
                 self._lat_dist_error
             )
             feedback_msg.global_path_deviation.orientation_error = self._ori_error
-            feedback_msg.prediction_horizon = self.config.prediction_horizon
 
             self.get_logger().info(
                 "Controlling Path — lat_err=%.3f, ori_err=%.3f"
@@ -1254,7 +1570,7 @@ class Controller(Component):
 
             time.sleep(1 / self.config.loop_rate)
 
-        if self._reached_end:
+        if reached:
             # WHEN PATH TRACKER SERVICE RETURNS RESULT
             self.get_logger().info("Reached end of path!")
             # Update the result msg
@@ -1306,13 +1622,6 @@ class Controller(Component):
         dist: float = self.robot_state.distance(goal_point)
         return dist <= self._path_controller._config.goal_dist_tolerance
 
-    def _execution_once(self):
-        """Intialize controller post activation"""
-        if self.config._mode == ControllerMode.VISION_FOLLOWER:
-            # Set up the vision controller eagerly to avoid first-call overhead
-            # in the action server.
-            self._vision_follower.setup()
-
     def _execution_step(self):
         """
         Controller main execution step
@@ -1329,6 +1638,7 @@ class Controller(Component):
             return
 
         if self._reached_end:
+            self._stop_robot()
             return
         try:
             status = self._path_control()
@@ -1342,11 +1652,16 @@ class Controller(Component):
             return
 
         if status == PathControlStatus.GOAL_REACHED:
+            self.get_logger().info(
+                f"Controller reached the end of the path with algorithm '{self.algorithm}'"
+            )
             self._reached_end = True
             plan_callback = self.get_callback(TopicsKeys.GLOBAL_PLAN)
             if plan_callback:
                 plan_callback.clear_last_msg()
         elif status == PathControlStatus.FAILED:
             self.health_status.set_fail_algorithm(
-                algorithm_names=[str(ControlClasses[self.algorithm])]
+                algorithm_names=[self.algorithm.value]
             )
+        elif status == PathControlStatus.WAITING_INPUTS:
+            self.health_status.set_fail_system()
