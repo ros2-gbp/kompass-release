@@ -1,14 +1,18 @@
 from typing import Optional, Dict, Union, List
 
+from attrs import evolve
+from rclpy import qos
+from ros_sugar.config import QoSConfig
 from ros_sugar.io import AllowedTopics
 from ros_sugar.io import Topic
 from ros_sugar.base_clients import ActionClientHandler
-from ros_sugar.utils import component_action
+from ros_sugar.utils import ActionReturnType, component_action
 from .defaults import TopicsKeys
 
 
 __all__ = [
     "ActionClientHandler",
+    "ActionReturnType",
     "component_action",
 ]
 
@@ -96,36 +100,60 @@ def _get_allowed_number(
     return None
 
 
+def default_to_latched_qos(topic: Optional[Topic]) -> None:
+    """Default a topic QoS to delivering its last message to subscribers that join after it was published
+
+    Required for data published only once, such as a static map. Both the publisher and
+    the subscribers of the topic need this QoS: reliable, so the single message is not
+    dropped, and transient local, so it is kept for late subscribers.
+
+    A default, not a rule: only the settings left at their QoS defaults are
+    filled in, so a reliability or a durability chosen in a recipe or a config
+    file is kept.
+
+    :param topic: Topic to update, nothing is done if None
+    :type topic: Optional[Topic]
+    """
+    if topic is None:
+        return
+    default = QoSConfig()
+    latched = {}
+    if topic.qos_profile.reliability == default.reliability:
+        latched["reliability"] = qos.ReliabilityPolicy.RELIABLE
+    if topic.qos_profile.durability == default.durability:
+        latched["durability"] = qos.DurabilityPolicy.TRANSIENT_LOCAL
+    topic.qos_profile = evolve(topic.qos_profile, **latched)
+
+
 def update_topics(
     topics_dict: Dict[TopicsKeys, Union[Topic, List[Topic], None]], **kwargs
 ) -> Dict[TopicsKeys, Union[Topic, List[Topic], None]]:
-    """Update a dictionary of topics given keyword arguments
+    """Get a new dictionary of topics updated with the given keyword arguments
+
+    The given dictionary is left unchanged
 
     :param topics_dict: Topic dictionary {topic_key_name: Topic}
     :type topics_dict: Dict[str, Topic]
     :return: Updated topics
     :rtype: Dict[str, Topic]
     """
-    if "allowed_config" in kwargs.keys():
-        allowed_config = kwargs["allowed_config"]
-        kwargs.pop("allowed_config")
-        # try:
-        for key, value in kwargs.items():
-            try:
-                topic_key = TopicsKeys(key)
-            except ValueError as e:
-                raise ValueError(
-                    f"Error updating topics: '{key}' is not a valid topic key. Allowed keys are: {list(allowed_config.keys())}"
-                ) from e
-            if _get_allowed_number(topic_key, value, allowed_config):
-                topics_dict[topic_key] = value
-    else:
-        for key, value in kwargs.items():
-            try:
-                topic_key = TopicsKeys(key)
-            except ValueError as e:
-                raise ValueError(
-                    f"Error updating topics: '{key}' is not a valid topic key. Allowed keys are: {list(allowed_config.keys())}"
-                ) from e
-            topics_dict[topic_key] = value
-    return topics_dict
+    allowed_config = kwargs.pop("allowed_config", None)
+    allowed_keys = (
+        list(allowed_config.keys()) if allowed_config else list(TopicsKeys)
+    )
+    # Copy the given topics (along with any list values) to keep it unchanged
+    updated_dict = {
+        key: list(value) if isinstance(value, list) else value
+        for key, value in topics_dict.items()
+    }
+    for key, value in kwargs.items():
+        try:
+            topic_key = TopicsKeys(key)
+        except ValueError as e:
+            raise ValueError(
+                f"Error updating topics: '{key}' is not a valid topic key. Allowed keys are: {allowed_keys}"
+            ) from e
+        if allowed_config and not _get_allowed_number(topic_key, value, allowed_config):
+            continue
+        updated_dict[topic_key] = value
+    return updated_dict
