@@ -20,14 +20,13 @@ from geometry_msgs.msg import (
     PoseStamped as ROSPoseStamped,
     TwistStamped as ROSTwistStamped,
 )
-from kompass_core.datatypes import LaserScanData
+from ros_sugar.io import LaserScanData
 from nav_msgs.msg import Odometry as ROSOdometry
 from nav_msgs.msg import Path as ROSPath
 from kompass_core.models import RobotState
 from sensor_msgs.msg import LaserScan as ROSLaserScan
-from sensor_msgs.msg import PointCloud2 as ROSPointCloud2
-from sensor_msgs.msg import CameraInfo as ROSCameraInfo
 
+from kompass_interfaces.msg import MissionStatus as ROSMissionStatus
 from kompass_interfaces.msg import TwistArray as ROSTwistArray
 from importlib.util import find_spec
 
@@ -39,10 +38,8 @@ from .callbacks import (
     PointStampedCallback,
     PoseCallback,
     PoseStampedCallback,
-    PointCloudCallback,
     TrackingsCallback,
     DetectionsCallback,
-    CameraInfoCallback,
     TwistStampedCallback,
     PointsOfInterestCallback,
 )
@@ -64,6 +61,7 @@ __all__ = [
     "Float64",
     "Trackings",
     "Detections",
+    "MissionStatus",
 ]
 
 
@@ -117,13 +115,6 @@ class PointsOfInterest(SupportedType):
         return ROSPointsOfInterest
 
 
-class CameraInfo(SupportedType):
-    """Class to support ROS2 sensor_msgs/msg/CameraInfo message"""
-
-    _ros_type = ROSCameraInfo
-    callback = CameraInfoCallback
-
-
 class LaserScan(BaseLaserScan):
     """Class to support ROS2 sensor_msgs/msg/LaserScan message"""
 
@@ -151,13 +142,6 @@ class LaserScan(BaseLaserScan):
         msg.intensities = output.intensities
 
         return msg
-
-
-class PointCloud2(SupportedType):
-    """Class to support ROS2 sensor_msgs/msg/PointCloud2 message"""
-
-    _ros_type = ROSPointCloud2
-    callback = PointCloudCallback
 
 
 class PointStamped(BasePointStamped):
@@ -246,6 +230,23 @@ class TwistArray(SupportedType):
 
         :param output:
         :type output: ROSTwistArray
+        :param kwargs:
+        """
+        return output
+
+
+class MissionStatus(SupportedType):
+    """Class to support ROS2 kompass_interfaces/msg/MissionStatus message"""
+
+    _ros_type = ROSMissionStatus
+    callback = GenericCallback
+
+    @classmethod
+    def convert(cls, output: ROSMissionStatus, **_):
+        """convert.
+
+        :param output:
+        :type output: ROSMissionStatus
         :param kwargs:
         """
         return output
@@ -349,8 +350,9 @@ class Path(BasePath):
     @classmethod
     def length(cls, path: ROSPath):
         total_length = 0.0
-        for pose_stamped in path.poses:
+        for start, end in zip(path.poses, path.poses[1:]):
             total_length += np.sqrt(
-                pose_stamped.pose.position.x**2 + pose_stamped.pose.position.y**2
+                (end.pose.position.x - start.pose.position.x) ** 2
+                + (end.pose.position.y - start.pose.position.y) ** 2
             )
         return float(total_length)
