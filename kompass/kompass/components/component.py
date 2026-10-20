@@ -2,7 +2,8 @@ import time
 import json
 from typing import Dict, List, Optional, Union, Tuple
 from ros_sugar.core import ComponentFallbacks, BaseComponent
-from ros_sugar.tf import TFListener, TFListenerConfig
+from ros_sugar.tf import TFListener
+from tf2_ros import TransformStamped
 from ros_sugar.io import Publisher, AllowedTopics
 
 from ..callbacks import GenericCallback
@@ -11,6 +12,17 @@ from .ros import Topic, update_topics
 from itertools import groupby
 from .defaults import TopicsKeys
 from kompass_core import set_logging_level
+from kompass_cpp.types import PointFieldType, SensorConfig
+
+# The runtime counterparts of the robot description: the C++ library defines
+# these, the description in Sugarcoat declares them, and this module is where
+# the two are matched up
+from kompass_core.models import (
+    AngularCtrlLimits as CoreAngularCtrlLimits,
+    LinearCtrlLimits as CoreLinearCtrlLimits,
+    RobotCtrlLimits,
+    RobotGeometry,
+)
 
 
 def _parse_from_topics_dict(
@@ -205,9 +217,22 @@ class Component(BaseComponent):
         """
         Getter of robot config
 
+        Every Kompass component reasons about the robot's body -- its size for
+        collision checking, its velocity envelope for control -- so a missing
+        robot config is an error rather than something to default around.
+
         :return: Robot configuration
         :rtype: RobotConfig
+        :raises ValueError: If no robot configuration has been set
         """
+        if self.config.robot is None:
+            raise ValueError(
+                f"Component '{self.node_name}' requires a robot configuration but "
+                "none is set. Provide one in the recipe, either for the whole stack "
+                "with 'launcher.robot = RobotConfig(...)', for this component with "
+                f"'{self.node_name}.config.robot = RobotConfig(...)', or by attaching "
+                "a robot plugin that supplies it."
+            )
         return self.config.robot
 
     @robot.setter
@@ -219,6 +244,54 @@ class Component(BaseComponent):
         :type config: RobotConfig
         """
         self.config.robot = config
+
+    @property
+    def robot_geometry_type(self) -> RobotGeometry.Type:
+        """
+        Getter of the robot geometry as the type the algorithms take
+
+        The description carries the geometry as a plain name, since Sugarcoat
+        does no geometry math. The algorithms take the type the C++ library
+        defines, so convert on the way in.
+
+        :return: Robot geometry type
+        :rtype: RobotGeometry.Type
+        """
+        return RobotGeometry.from_str(self.robot.geometry_type)
+
+    @property
+    def robot_ctrl_limits(self) -> RobotCtrlLimits:
+        """
+        Getter of the robot velocity envelope as the type the algorithms take
+
+        Counterpart of ``robot_geometry_type`` for the control limits: the
+        description declares them, the C++ library enforces them, and this is
+        the one place the two are matched up.
+
+        :return: Robot control limits
+        :rtype: RobotCtrlLimits
+        """
+        return RobotCtrlLimits(
+            vx_limits=CoreLinearCtrlLimits(
+                max_vel=self.robot.ctrl_vx_limits.max_vel,
+                max_acc=self.robot.ctrl_vx_limits.max_acc,
+                max_decel=self.robot.ctrl_vx_limits.max_decel,
+                min_vel=self.robot.ctrl_vx_limits.min_vel,
+            ),
+            vy_limits=CoreLinearCtrlLimits(
+                max_vel=self.robot.ctrl_vy_limits.max_vel,
+                max_acc=self.robot.ctrl_vy_limits.max_acc,
+                max_decel=self.robot.ctrl_vy_limits.max_decel,
+                min_vel=self.robot.ctrl_vy_limits.min_vel,
+            ),
+            omega_limits=CoreAngularCtrlLimits(
+                max_omega=self.robot.ctrl_omega_limits.max_omega,
+                max_ang=self.robot.ctrl_omega_limits.max_ang,
+                max_acc=self.robot.ctrl_omega_limits.max_acc,
+                max_decel=self.robot.ctrl_omega_limits.max_decel,
+                min_omega=self.robot.ctrl_omega_limits.min_omega,
+            ),
+        )
 
     @property
     def run_type(self) -> ComponentRunType:
@@ -260,10 +333,32 @@ class Component(BaseComponent):
         return self._outputs_keys
 
     # INPUTS/OUTPUTS AND CONFIGURATION
+    def _ensure_not_launched(self, method_name: str) -> None:
+        """Guards topic reconfiguration against running components.
+
+        :param method_name: Name of the reconfiguration method, for the error
+        :type method_name: str
+        :raises RuntimeError: If the component has live ROS entities
+        """
+        launched = any(
+            getattr(callback, "_subscriber", None) is not None
+            for callback in self.callbacks.values()
+        ) or any(
+            getattr(publisher, "_publisher", None) is not None
+            for publisher in self.publishers_dict.values()
+        )
+        if launched:
+            raise RuntimeError(
+                f"Cannot reconfigure '{method_name}' of component "
+                f"'{self.node_name}' after launch. Configure topics before "
+                "bringup, or restart the component."
+            )
+
     def inputs(self, **kwargs):
         """
         Set component input streams (topics) : kwargs[topic_keyword]=Topic()
         """
+        self._ensure_not_launched("inputs")
         if self.__allowed_inputs:
             kwargs["allowed_config"] = self.__allowed_inputs
         old_dict = (
@@ -276,11 +371,19 @@ class Component(BaseComponent):
         # Update the list containing all the Topics (without None values)
         self._inputs_list = self._reparse_inputs_callbacks(_inputs)
         self.in_topics = [topic for topic in self._inputs_list if topic]
+        # Rebuild the callbacks from the NEW topics
+        self.callbacks = {
+            in_topic.name: in_topic.msg_type.callback(
+                in_topic, node_name=self.node_name
+            )
+            for in_topic in self.in_topics
+        }
 
     def outputs(self, **kwargs):
         """
         Set component output streams (topics)
         """
+        self._ensure_not_launched("outputs")
         if self.__allowed_outputs:
             kwargs["allowed_config"] = self.__allowed_outputs
         old_dict = (
@@ -292,6 +395,11 @@ class Component(BaseComponent):
         (self._outputs_keys, _outputs) = _parse_from_topics_dict(topics_dict)
         self._outputs_list = self._reparse_outputs_converts(_outputs)
         self.out_topics = [topic for topic in self._outputs_list if topic]
+        # Rebuild the publishers from the NEW topics
+        self.publishers_dict = {
+            out_topic.name: Publisher(out_topic, node_name=self.node_name)
+            for out_topic in self.out_topics
+        }
 
     def set_input(self, **kwargs) -> bool:
         """Set value of an input(s) topic
@@ -446,102 +554,215 @@ class Component(BaseComponent):
 
     @property
     def odom_tf_listener(self) -> Optional[TFListener]:
-        """Gets a transform listener for Odometry (from odom to world)
+        """Gets a transform listener from the robot location frame to the world.
 
-        :return:
-        :rtype: TFListener
+        The localization frame is not configured: it is read from the
+        ``header.frame_id`` of the location messages, so this is None until the
+        first one arrives. When the robot is already localized in the world
+        frame the lookup resolves to the identity transform, so "no odometry"
+        needs no special case.
+
+        :return: TF listener from the location frame to the world frame
+        :rtype: Optional[TFListener]
         """
-        if not hasattr(self, "_odom_tf_listener"):
-            if self.config.frames.odom != self.config.frames.world:
-                self._odom_tf_listener = self.get_transform_listener(
-                    source_frame=self.config.frames.odom,
-                    goal_frame=self.config.frames.world,
-                )
-            else:
-                self._odom_tf_listener = None
-        return self._odom_tf_listener
+        return self.input_tf_listener(
+            TopicsKeys.ROBOT_LOCATION, self.config.frames.world
+        )
 
-    @property
-    def scan_tf_listener(self) -> TFListener:
-        """Gets a transform listener for LaserScan (from scan to robot base)
+    def transform_inputs_to(
+        self, topic_key: TopicsKeys, goal_frame: str, static_tf: bool = False
+    ) -> None:
+        """Ask for every input under a key to be delivered in a given frame.
 
-        :return:
-        :rtype: TFListener
-        """
-        if not hasattr(self, "_scan_tf_listener"):
-            self._scan_tf_listener = self.get_transform_listener(
-                source_frame=self.config.frames.scan,
-                goal_frame=self.config.frames.robot_base,
-                static_tf=True,
-            )
-        return self._scan_tf_listener
+        Handles keys bound to several topics (such as multiple proximity
+        sensors), each of which carries its own source frame in its messages.
 
-    @property
-    def depth_tf_listener(self) -> TFListener:
-        """Gets a transform listener for LaserScan (from scan to robot base)
-
-        :return:
-        :rtype: TFListener
-        """
-        if not hasattr(self, "_depth_tf_listener"):
-            self._depth_tf_listener = self.get_transform_listener(
-                source_frame=self.config.frames.depth,
-                goal_frame=self.config.frames.robot_base,
-                static_tf=True,
-            )
-        return self._depth_tf_listener
-
-    @property
-    def pc_tf_listener(self) -> TFListener:
-        """Gets a transform listener for LaserScan (from scan to robot base)
-
-        :return:
-        :rtype: TFListener
-        """
-        if not hasattr(self, "_pc_tf_listener"):
-            self._pc_tf_listener = self.get_transform_listener(
-                source_frame=self.config.frames.point_cloud,
-                goal_frame=self.config.frames.robot_base,
-                static_tf=True,
-            )
-        return self._pc_tf_listener
-
-    def get_transform_listener(self, **kwargs) -> TFListener:
-        """Gets a transform listener
-
-        :param src_frame: Source coordinates frame
-        :type src_frame: str
-        :param goal_frame: Goal coordinates frame
+        :param topic_key: Key of the component input topic(s)
+        :type topic_key: TopicsKeys
+        :param goal_frame: Frame the data should be expressed in
         :type goal_frame: str
-
-        :return: TF listener object
-        :rtype: TFListener
+        :param static_tf: Whether the sensors are rigidly mounted
+        :type static_tf: bool
         """
-        # Configure transform source and goal frames
-        tf_config = TFListenerConfig(**kwargs)
-        tf_listener: TFListener = self.create_tf_listener(tf_config)
-        return tf_listener
+        names = self.in_topic_name(topic_key)
+        if not names:
+            return
+        for name in names if isinstance(names, list) else [names]:
+            self.transform_input_to(name, goal_frame, static_tf=static_tf)
 
-    def _wait_for_tf(self, tf_listener: TFListener, description: str = "") -> bool:
-        """Block up to ``config.topic_subscription_timeout`` waiting for a
-        transform to arrive on the given listener.
+    def input_tf_listener(
+        self,
+        topic_key: TopicsKeys,
+        goal_frame: str,
+        static_tf: bool = False,
+        idx: int = 0,
+    ) -> Optional[TFListener]:
+        """Gets a transform listener from an input's own frame to a given frame.
 
-        :param tf_listener: Transform listener to poll
-        :param description: Short label for the TF, used in the waiting log
-        :return: True if the transform was acquired before timing out
+        The source frame is not configured anywhere: it is read from the
+        ``header.frame_id`` of the data itself. This is the counterpart of
+        ``transform_input_to``, for algorithms that need the transform (its
+        translation and rotation) rather than transformed data.
+
+        :param topic_key: Key of the component input topic
+        :type topic_key: TopicsKeys
+        :param goal_frame: Frame to transform into, usually one of ``config.frames``
+        :type goal_frame: str
+        :param static_tf: Whether the sensor is rigidly mounted
+        :type static_tf: bool
+        :param idx: Index of the input, for keys bound to several topics
+        :type idx: int
+
+        :return: TF listener, or None until the first message on that input
+            arrives. Data already in the goal frame yields a listener that
+            resolves to the identity transform.
+        :rtype: Optional[TFListener]
         """
-        timeout = 0.0
-        while (
-            not tf_listener.got_transform
-            and timeout < self.config.topic_subscription_timeout
-        ):
+        callback = self.get_callback(topic_key, idx)
+        if not callback or not callback.frame_id:
+            return None
+        return self.get_transform_listener(
+            callback.frame_id, goal_frame, static_tf=static_tf
+        )
+
+    def resolve_input_tf(
+        self,
+        topic_key: TopicsKeys,
+        goal_frame: Optional[str] = None,
+        idx: int = 0,
+    ) -> Tuple[bool, Optional[TransformStamped]]:
+        """Resolve, at call time, the transform taking an input into a given frame.
+
+        Unlike the transform cached on a callback (refreshed only on message
+        arrival), this looks the TF up live, so a TF that came up late is still
+        picked up. Pass the returned transform to the callback's ``get_output``
+        to deliver the data in the goal frame.
+
+        :param topic_key: Key of the component input topic
+        :type topic_key: TopicsKeys
+        :param goal_frame: Frame to deliver the data in, defaults to the
+            configured world frame
+        :type goal_frame: Optional[str]
+        :param idx: Index of the input, for keys bound to several topics
+        :type idx: int
+
+        :return: Whether the input can be delivered in the goal frame, and the
+            transform to ask for it with (None when none is needed)
+        :rtype: Tuple[bool, Optional[TransformStamped]]
+        """
+        goal = goal_frame or self.config.frames.world
+        callback = self.get_callback(topic_key, idx)
+        # No frame to reason about: nothing to look up and nothing to transform,
+        # so the data is taken as it arrived
+        if not callback or not callback.frame_id:
+            return True, None
+
+        if callback.frame_id == goal:
+            return True, None
+
+        tf_listener = self.get_transform_listener(callback.frame_id, goal)
+        if not tf_listener.got_transform:
+            return False, None
+        return True, tf_listener.transform
+
+    def wait_input_tf(
+        self,
+        topic_key: TopicsKeys,
+        idx: int = 0,
+        timeout: Optional[float] = None,
+        static_tf: bool = True,
+    ) -> Optional[TFListener]:
+        """Block until an input has delivered its first message and the
+        transform from the input's own frame to the robot base is available.
+        The first message is names the input's frame.
+
+        :param topic_key: Key of the component input topic
+        :type topic_key: TopicsKeys
+        :param idx: Index of the input, for keys bound to several topics
+        :type idx: int
+        :type timeout: Optional[float]
+        :param static_tf: Whether the input's frame is rigidly mounted
+        :type static_tf: bool
+
+        :return: The listener holding the transform, or None when the timeout
+            passed
+        :rtype: Optional[TFListener]
+        """
+        callback = self.get_callback(topic_key, idx)
+        name = callback.input_topic.name if callback else str(topic_key)
+        robot_base = self.config.frames.robot_base
+        waited = 0.0
+        tf_listener = None
+        while self.context.ok() and (timeout is None or waited < timeout):
+            tf_listener = self.input_tf_listener(
+                topic_key, robot_base, static_tf=static_tf, idx=idx
+            )
+            if tf_listener is not None and tf_listener.got_transform:
+                return tf_listener
             self.get_logger().info(
-                f"Waiting for {description or 'requested'} TF...",
+                f"Waiting for input '{name}' to deliver data and for its TF to "
+                f"the robot base frame '{robot_base}'...",
                 once=True,
             )
-            time.sleep(1 / self.config.loop_rate)
-            timeout += 1 / self.config.loop_rate
-        return tf_listener.got_transform
+            time.sleep(self.config.topic_try_wait_timeout)
+            waited += self.config.topic_try_wait_timeout
+        missing = (
+            "its first message"
+            if tf_listener is None
+            else f"its TF to the robot base frame '{robot_base}'"
+        )
+        if not self.context.ok():
+            self.get_logger().warning(
+                f"Input '{name}': stopped waiting for {missing}, the node is "
+                "shutting down"
+            )
+            return None
+        self.get_logger().warning(
+            f"Input '{name}': {missing} is still not available after {timeout} seconds"
+        )
+        return None
+
+    def wait_sensor_config(
+        self, topic_key: TopicsKeys, idx: int = 0, timeout: Optional[float] = None
+    ) -> Optional[SensorConfig]:
+        """Describe a spatial sensor input (LaserScan or PointCloud2) as the
+        core's ``SensorConfig``. Its mount pose from the transform of its own
+        frame to the robot base and, for a point cloud, the encoding of its
+        x/y/z fields read from the first message.
+
+        :param topic_key: Key of the sensor input topic
+        :type topic_key: TopicsKeys
+        :param idx: Index of the input, for keys bound to several topics
+        :type idx: int
+        :param timeout: Seconds to wait before giving up, None waits
+            indefinitely
+        :type timeout: Optional[float]
+
+        :return: The sensor description, or None when the timeout passed or
+            the first message could not be decoded
+        :rtype: Optional[SensorConfig]
+        """
+        tf_listener = self.wait_input_tf(topic_key, idx, timeout=timeout)
+        if tf_listener is None:
+            return None
+        callback = self.get_callback(topic_key, idx)
+        # Get a message out
+        output = callback.get_output()
+        if output is None:
+            self.get_logger().warning(
+                f"Sensor '{callback.input_topic.name}' delivered a message that "
+                "could not be decoded (e.g. a point cloud without x/y/z fields)"
+            )
+            return None
+        # Only point clouds carry a field encoding. Gets ignored for laser scan
+        field_type = getattr(output, "x_field_datatype", None)
+        return SensorConfig(
+            position=tf_listener.translation,
+            rotation=tf_listener.rotation,
+            cloud_field_type=PointFieldType.from_int(field_type)
+            if field_type is not None
+            else PointFieldType.FLOAT32,
+        )
 
     def in_topic_name(self, key: Union[str, TopicsKeys]) -> Union[str, List[str], None]:
         """Get the topic(s) name(s) corresponding to an input key name
@@ -642,12 +863,29 @@ class Component(BaseComponent):
         """
         try:
             topic_names: Union[str, List[str], None] = self.in_topic_name(key)
-            if isinstance(topic_names, List):
-                return self.callbacks[topic_names[idx]]
-            return self.callbacks[topic_names] if topic_names else None
-        except Exception as e:
+        except ValueError as e:
             raise KeyError(
-                f"Unknown input '{key}' for component '{self.node_name}'"
+                f"Unknown input key '{key}' for component '{self.node_name}'"
+            ) from e
+        if isinstance(topic_names, List):
+            if idx >= len(topic_names):
+                raise KeyError(
+                    f"Input '{key}' of component '{self.node_name}' has "
+                    f"{len(topic_names)} topics; index {idx} is out of range"
+                )
+            topic_name = topic_names[idx]
+        else:
+            topic_name = topic_names
+        if topic_name is None:
+            return None
+        try:
+            return self.callbacks[topic_name]
+        except KeyError as e:
+            raise KeyError(
+                f"Input '{key}' of component '{self.node_name}' maps to topic "
+                f"'{topic_name}' but no callback exists for it (callbacks: "
+                f"{list(self.callbacks)}) - the input topics and callbacks "
+                "are out of sync"
             ) from e
 
     def get_publisher(self, key: Union[str, TopicsKeys], idx: int = 0) -> Publisher:
@@ -663,12 +901,31 @@ class Component(BaseComponent):
         """
         try:
             topic_names: Union[str, List[str], None] = self.out_topic_name(key)
-            if isinstance(topic_names, List):
-                return self.publishers_dict[topic_names[idx]]
-            return self.publishers_dict[topic_names]
-        except Exception as e:
+        except ValueError as e:
             raise KeyError(
-                f"Unknown output '{key}' for component '{self.node_name}'"
+                f"Unknown output key '{key}' for component '{self.node_name}'"
+            ) from e
+        if isinstance(topic_names, List):
+            if idx >= len(topic_names):
+                raise KeyError(
+                    f"Output '{key}' of component '{self.node_name}' has "
+                    f"{len(topic_names)} topics; index {idx} is out of range"
+                )
+            topic_name = topic_names[idx]
+        else:
+            topic_name = topic_names
+        if topic_name is None:
+            raise KeyError(
+                f"Output '{key}' of component '{self.node_name}' has no topic set"
+            )
+        try:
+            return self.publishers_dict[topic_name]
+        except KeyError as e:
+            raise KeyError(
+                f"Output '{key}' of component '{self.node_name}' maps to topic "
+                f"'{topic_name}' but no publisher exists for it (publishers: "
+                f"{list(self.publishers_dict)}) - the output topics and "
+                "publishers are out of sync"
             ) from e
 
     def callbacks_inputs_check(
