@@ -47,6 +47,7 @@ def __init__(
 | `SPATIAL_SENSOR` | `"sensor_data"` | LiDAR, depth, point cloud |
 | `VISION_DETECTIONS` | `"vision_detections"` | Object detection results |
 | `DEPTH_CAM_INFO` | `"depth_camera_info"` | Depth camera intrinsics |
+| `VISION_DEPTH` | `"vision_depth"` | Separate depth for lifting vision detections: aligned depth image or point cloud |
 | `LOCAL_PLAN` | `"local_plan"` | Local path segment |
 | `PATH_SAMPLES` | `"path_samples"` | Sampled path candidates |
 | `INTERMEDIATE_CMD` | `"command"` | Single velocity command |
@@ -57,6 +58,7 @@ def __init__(
 | `FINAL_COMMAND` | `"robot_command"` | Command sent to robot driver |
 | `EMERGENCY` | `"emergency_stop"` | Emergency stop signal |
 | `REACHED_END` | `"reached_end"` | Goal reached flag |
+| `MISSION_STATUS` | `"mission_status"` | Progress of the ongoing multi-waypoint mission |
 
 Using `TopicsKeys` ensures consistent naming across components and enables automatic wiring in recipes.
 
